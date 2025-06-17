@@ -16,9 +16,10 @@ import (
 
 // Example is an example plugin to show how to write a plugin.
 type EdgeCDNXService struct {
-	Next     plugin.Handler
-	Services *[]Service
-	Sync     *sync.RWMutex
+	Next           plugin.Handler
+	Services       *[]Service
+	Sync           *sync.RWMutex
+	InformerSynced func() bool
 }
 
 type EdgeCDNXServiceResponseWriter struct {

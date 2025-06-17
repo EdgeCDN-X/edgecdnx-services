@@ -1,10 +1,10 @@
 package edgecdnxservices
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
@@ -20,10 +20,8 @@ import (
 	clientsetscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clog "github.com/coredns/coredns/plugin/pkg/log"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // init registers this plugin.
@@ -53,10 +51,6 @@ func setup(c *caddy.Controller) error {
 	infrastructurev1alpha1.AddToScheme(scheme)
 
 	kubeconfig := ctrl.GetConfigOrDie()
-	kubeclient, err := client.New(kubeconfig, client.Options{Scheme: scheme})
-	if err != nil {
-		return plugin.Error("edgecdnxprefixlist", fmt.Errorf("failed to create Kubernetes client: %w", err))
-	}
 
 	c.Next()
 
@@ -69,35 +63,12 @@ func setup(c *caddy.Controller) error {
 		Namespace: args[0],
 	}
 
-	kserviceList := &infrastructurev1alpha1.ServiceList{}
-	if err := kubeclient.List(context.TODO(), kserviceList, &client.ListOptions{
-		Namespace: services.Namespace,
-	}); err != nil {
-		return plugin.Error("edgecdnxservices", fmt.Errorf("failed to list Services: %w", err))
-	}
-
-	for _, service := range kserviceList.Items {
-		s := Service{
-			Name: service.Name,
-			Customer: CustomerSpec{
-				Name: service.Spec.Customer.Name,
-				Id:   service.Spec.Customer.Id,
-			},
-			Cache: service.Spec.Cache,
-		}
-		services.Services = append(services.Services, s)
-	}
-
 	clientSet, err := dynamic.NewForConfig(kubeconfig)
 	if err != nil {
 		return plugin.Error("edgecdnxservices", fmt.Errorf("failed to create dynamic client: %w", err))
 	}
 
-	fac := dynamicinformer.NewFilteredDynamicSharedInformerFactory(clientSet, 0, services.Namespace,
-		func(options *metav1.ListOptions) {
-			options.ResourceVersion = kserviceList.ListMeta.ResourceVersion
-		},
-	)
+	fac := dynamicinformer.NewFilteredDynamicSharedInformerFactory(clientSet, 10*time.Minute, services.Namespace, nil)
 	informer := fac.ForResource(schema.GroupVersionResource{
 		Group:    infrastructurev1alpha1.GroupVersion.Group,
 		Version:  infrastructurev1alpha1.GroupVersion.Version,
@@ -220,7 +191,7 @@ func setup(c *caddy.Controller) error {
 
 	// Add the Plugin to CoreDNS, so Servers can use it in their plugin chain.
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
-		return EdgeCDNXService{Next: next, Services: &services.Services, Sync: sem}
+		return EdgeCDNXService{Next: next, Services: &services.Services, Sync: sem, InformerSynced: informer.HasSynced}
 	})
 
 	// All OK, return a nil error.
