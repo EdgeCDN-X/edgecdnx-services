@@ -10,7 +10,6 @@ import (
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/request"
-
 	"github.com/miekg/dns"
 )
 
@@ -31,12 +30,13 @@ func (e EdgeCDNXService) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *
 
 	for i := range *e.Services {
 		service := (*e.Services)[i]
-		if fmt.Sprintf("%s.", service.Service.Name) == state.Name() {
+		if fmt.Sprintf("%s.", service.Name) == state.Name() {
 			// Service Exists, lets continue down the chain
 			return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
 		}
 	}
 
+	log.Debugf("edgecdnxservices: service %s not defined in catalogue", state.Name())
 	return dns.RcodeServerFailure, nil
 }
 

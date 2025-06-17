@@ -1,23 +1,27 @@
 package edgecdnxservices
 
 import (
+	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
-	"github.com/coredns/coredns/plugin/pkg/log"
-	"gopkg.in/yaml.v3"
+
+	"k8s.io/apimachinery/pkg/runtime"
+
+	infrastructurev1alpha1 "github.com/EdgeCDN-X/edgecdnx-controller/api/v1alpha1"
+	clientsetscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // init registers this plugin.
 func init() { plugin.Register("edgecdnxservices", setup) }
 
 type EdgeCDNXServiceRouting struct {
-	FilePath string
-	Services []Service
+	Namespace string
+	Services  []Service
 }
 
 type CustomerSpec struct {
@@ -25,20 +29,25 @@ type CustomerSpec struct {
 	Id   int    `yaml:"id"`
 }
 
-type ServiceSpec struct {
+type Service struct {
 	Name     string       `yaml:"name"`
-	Origins  []string     `yaml:"origins"`
 	Customer CustomerSpec `yaml:"customer"`
 	Cache    string       `yaml:"cache"`
-}
-
-type Service struct {
-	Service ServiceSpec `yaml:"service"`
 }
 
 // setup is the function that gets called when the config parser see the token "example". Setup is responsible
 // for parsing any extra options the example plugin may have. The first token this function sees is "example".
 func setup(c *caddy.Controller) error {
+	scheme := runtime.NewScheme()
+	clientsetscheme.AddToScheme(scheme)
+	infrastructurev1alpha1.AddToScheme(scheme)
+
+	kubeconfig := ctrl.GetConfigOrDie()
+	kubeclient, err := client.New(kubeconfig, client.Options{Scheme: scheme})
+	if err != nil {
+		return plugin.Error("edgecdnxprefixlist", fmt.Errorf("failed to create Kubernetes client: %w", err))
+	}
+
 	c.Next()
 
 	args := c.RemainingArgs()
@@ -47,31 +56,26 @@ func setup(c *caddy.Controller) error {
 	}
 
 	services := &EdgeCDNXServiceRouting{
-		FilePath: args[0],
+		Namespace: args[0],
 	}
 
-	files, err := filepath.Glob(filepath.Join(services.FilePath, "*.yaml"))
-	if err != nil {
-		return plugin.Error("edgecdnxservices", err)
+	kserviceList := &infrastructurev1alpha1.ServiceList{}
+	if err := kubeclient.List(context.TODO(), kserviceList, &client.ListOptions{
+		Namespace: services.Namespace,
+	}); err != nil {
+		return plugin.Error("edgecdnxservices", fmt.Errorf("failed to list Services: %w", err))
 	}
 
-	// Process each YAML file (e.g., validate or load into memory)
-	for _, file := range files {
-		// Example: Log the file name or perform further processing
-		log.Debug(fmt.Sprintf("Found YAML file: %s\n", file))
-
-		content, err := os.ReadFile(file)
-		if err != nil {
-			return plugin.Error("edgecdnxservices", fmt.Errorf("failed to read file %s: %w", file, err))
+	for _, service := range kserviceList.Items {
+		s := Service{
+			Name: service.Name,
+			Customer: CustomerSpec{
+				Name: service.Spec.Customer.Name,
+				Id:   service.Spec.Customer.Id,
+			},
+			Cache: service.Spec.Cache,
 		}
-
-		var data Service
-		if err := yaml.Unmarshal(content, &data); err != nil {
-			log.Error(fmt.Sprintf("unmarshal error %v", err))
-			return plugin.Error("edgecdnxservices", fmt.Errorf("failed to parse YAML file %s: %w", file, err))
-		}
-
-		services.Services = append(services.Services, data)
+		services.Services = append(services.Services, s)
 	}
 
 	// Add the Plugin to CoreDNS, so Servers can use it in their plugin chain.
