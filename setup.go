@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clog "github.com/coredns/coredns/plugin/pkg/log"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // init registers this plugin.
@@ -92,7 +93,11 @@ func setup(c *caddy.Controller) error {
 		return plugin.Error("edgecdnxservices", fmt.Errorf("failed to create dynamic client: %w", err))
 	}
 
-	fac := dynamicinformer.NewFilteredDynamicSharedInformerFactory(clientSet, 0, services.Namespace, nil)
+	fac := dynamicinformer.NewFilteredDynamicSharedInformerFactory(clientSet, 0, services.Namespace,
+		func(options *metav1.ListOptions) {
+			options.ResourceVersion = kserviceList.ListMeta.ResourceVersion
+		},
+	)
 	informer := fac.ForResource(schema.GroupVersionResource{
 		Group:    infrastructurev1alpha1.GroupVersion.Group,
 		Version:  infrastructurev1alpha1.GroupVersion.Version,
@@ -103,17 +108,8 @@ func setup(c *caddy.Controller) error {
 
 	sem := &sync.RWMutex{}
 
-	syncMux := &sync.RWMutex{}
-	synced := false
-
 	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
-			syncMux.RLock()
-			defer syncMux.RUnlock()
-			if !synced {
-				return
-			}
-
 			s_raw, ok := obj.(*unstructured.Unstructured)
 			if !ok {
 				clog.Errorf("edgecdnxservices: expected Service object, got %T", obj)
@@ -146,12 +142,6 @@ func setup(c *caddy.Controller) error {
 			clog.Infof("edgecdnxservices: Added Service %s", service.Name)
 		},
 		UpdateFunc: func(oldObj, newObj any) {
-			syncMux.RLock()
-			defer syncMux.RUnlock()
-			if !synced {
-				return
-			}
-
 			s_new_raw, ok := newObj.(*unstructured.Unstructured)
 			if !ok {
 				clog.Errorf("edgecdnxservices: expected Service object, got %T", s_new_raw)
@@ -188,12 +178,6 @@ func setup(c *caddy.Controller) error {
 			clog.Infof("edgecdnxservices: Updated Service %s", newService.Name)
 		},
 		DeleteFunc: func(obj any) {
-			syncMux.RLock()
-			defer syncMux.RUnlock()
-			if !synced {
-				return
-			}
-
 			s_raw, ok := obj.(*unstructured.Unstructured)
 			if !ok {
 				clog.Errorf("edgecdnxservices: expected Service object, got %T", obj)
@@ -226,15 +210,6 @@ func setup(c *caddy.Controller) error {
 
 	factoryCloseChan := make(chan struct{})
 	fac.Start(factoryCloseChan)
-
-	syncChan := make(chan struct{})
-	defer close(syncChan)
-	isSynced := cache.WaitForCacheSync(syncChan, informer.HasSynced)
-	syncMux.Lock()
-	synced = isSynced
-	syncMux.Unlock()
-
-	clog.Debugf("edgecdnxservices: informer synced: %v", synced)
 
 	c.OnShutdown(func() error {
 		clog.Infof("edgecdnxservices: shutting down informer")
