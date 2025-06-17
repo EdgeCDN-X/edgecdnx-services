@@ -6,6 +6,7 @@ package edgecdnxservices
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/log"
@@ -17,6 +18,7 @@ import (
 type EdgeCDNXService struct {
 	Next     plugin.Handler
 	Services *[]Service
+	Sync     *sync.RWMutex
 }
 
 type EdgeCDNXServiceResponseWriter struct {
@@ -28,6 +30,9 @@ func (e EdgeCDNXService) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *
 
 	log.Debugf("edgecdnxservices %s", state.Name())
 
+	e.Sync.RLock()
+	defer e.Sync.RUnlock()
+
 	for i := range *e.Services {
 		service := (*e.Services)[i]
 		if fmt.Sprintf("%s.", service.Name) == state.Name() {
@@ -35,7 +40,6 @@ func (e EdgeCDNXService) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *
 			return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
 		}
 	}
-
 	log.Debugf("edgecdnxservices: service %s not defined in catalogue", state.Name())
 	return dns.RcodeServerFailure, nil
 }
