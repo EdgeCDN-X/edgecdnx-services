@@ -3,12 +3,14 @@ package edgecdnxservices
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
+	"github.com/miekg/dns"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	kruntime "k8s.io/apimachinery/pkg/runtime"
@@ -30,6 +32,8 @@ func init() { plugin.Register("edgecdnxservices", setup) }
 type EdgeCDNXServiceRouting struct {
 	Namespace string
 	Services  []Service
+	Email     string
+	Soa       string
 }
 
 type CustomerSpec struct {
@@ -39,6 +43,7 @@ type CustomerSpec struct {
 
 type Service struct {
 	Name     string       `yaml:"name"`
+	Domain   string       `yaml:"domain"`
 	Customer CustomerSpec `yaml:"customer"`
 	Cache    string       `yaml:"cache"`
 }
@@ -51,16 +56,64 @@ func setup(c *caddy.Controller) error {
 	infrastructurev1alpha1.AddToScheme(scheme)
 
 	kubeconfig := ctrl.GetConfigOrDie()
+	c.Next() // plugin name
 
-	c.Next()
+	origins := plugin.OriginsFromArgsOrServerBlock(c.RemainingArgs(), c.ServerBlockKeys)
 
-	args := c.RemainingArgs()
-	if len(args) != 1 {
-		return plugin.Error("edgecdnxservices", c.ArgErr())
+	if len(origins) == 0 {
+		origins = []string{"."}
 	}
 
-	services := &EdgeCDNXServiceRouting{
-		Namespace: args[0],
+	services := &EdgeCDNXServiceRouting{}
+
+	fmt.Printf("origins, %v\n", origins)
+	records := make(map[string][]dns.RR)
+
+	for _, o := range origins {
+		records[o] = []dns.RR{}
+	}
+
+	//@ 60 IN           SOA             ns.cdn.edgecdnx.com. noc.edgecdnx.com. 2025061801 7200 3600 1209600 3600
+
+	for c.NextBlock() {
+		val := c.Val()
+		args := c.RemainingArgs()
+		if val == "namespace" {
+			services.Namespace = args[0]
+		}
+		if val == "email" {
+			services.Email = args[0]
+		}
+		if val == "soa" {
+			services.Soa = args[0]
+		}
+		if val == "ns" {
+			if len(args) != 2 {
+				return plugin.Error("edgecdnxservices", fmt.Errorf("expected 2 arguments for ns, got %d", len(args)))
+			}
+			for _, o := range origins {
+				re, err := dns.NewRR(fmt.Sprintf("$ORIGIN %s\n@ IN NS %s\n", o, args[0]))
+				re.Header().Name = strings.ToLower(re.Header().Name)
+				if err != nil {
+					return plugin.Error("edgecdnxservices", fmt.Errorf("failed to create NS record: %w", err))
+				}
+				records[o] = append(records[o], re)
+				re, err = dns.NewRR(fmt.Sprintf("$ORIGIN %s\n%s IN A %s", o, args[0], args[1]))
+				re.Header().Name = strings.ToLower(re.Header().Name)
+				if err != nil {
+					return plugin.Error("edgecdnxservices", fmt.Errorf("failed to create NS record: %w", err))
+				}
+				records[o] = append(records[o], re)
+			}
+		}
+	}
+
+	for _, o := range origins {
+		soa, err := dns.NewRR(fmt.Sprintf("$ORIGIN %s\n@ IN SOA %s.%s %s. 2025061801 7200 3600 1209600 3600", o, services.Soa, o, services.Email))
+		if err != nil {
+			return plugin.Error("edgecdnxservices", fmt.Errorf("failed to create SOA record: %w", err))
+		}
+		records[o] = append(records[o], soa)
 	}
 
 	clientSet, err := dynamic.NewForConfig(kubeconfig)
@@ -100,7 +153,8 @@ func setup(c *caddy.Controller) error {
 			}
 
 			s := Service{
-				Name: service.Name,
+				Name:   service.Name,
+				Domain: service.Spec.Domain,
 				Customer: CustomerSpec{
 					Name: service.Spec.Customer.Name,
 					Id:   service.Spec.Customer.Id,
@@ -136,7 +190,8 @@ func setup(c *caddy.Controller) error {
 			for i, service := range services.Services {
 				if service.Name == newService.Name {
 					services.Services[i] = Service{
-						Name: newService.Name,
+						Name:   newService.Name,
+						Domain: newService.Spec.Domain,
 						Customer: CustomerSpec{
 							Name: newService.Spec.Customer.Name,
 							Id:   newService.Spec.Customer.Id,
@@ -189,9 +244,15 @@ func setup(c *caddy.Controller) error {
 		return nil
 	})
 
+	for _, o := range origins {
+		for _, record := range records[o] {
+			fmt.Printf("Record: %s\n", record.String())
+		}
+	}
+
 	// Add the Plugin to CoreDNS, so Servers can use it in their plugin chain.
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
-		return EdgeCDNXService{Next: next, Services: &services.Services, Sync: sem, InformerSynced: informer.HasSynced}
+		return EdgeCDNXService{Next: next, Services: &services.Services, Sync: sem, InformerSynced: informer.HasSynced, Origins: origins, Records: records}
 	})
 
 	// All OK, return a nil error.

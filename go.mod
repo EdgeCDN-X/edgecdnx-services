@@ -3,12 +3,11 @@ module github.com/EdgeCDN-X/edgecdnx-services
 go 1.24.4
 
 require (
-	github.com/EdgeCDN-X/edgecdnx-controller v0.0.1
+	github.com/EdgeCDN-X/edgecdnx-controller v0.0.2
 	github.com/coredns/caddy v1.1.2-0.20241029205200-8de985351a98
 	github.com/coredns/coredns v1.12.1
 	github.com/miekg/dns v1.1.66
 	github.com/prometheus/client_golang v1.22.0
-	google.golang.org/appengine v1.6.8
 	k8s.io/apimachinery v0.33.0
 	k8s.io/client-go v0.33.0
 	sigs.k8s.io/controller-runtime v0.21.0

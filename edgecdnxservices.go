@@ -20,6 +20,8 @@ type EdgeCDNXService struct {
 	Services       *[]Service
 	Sync           *sync.RWMutex
 	InformerSynced func() bool
+	Origins        []string
+	Records        map[string][]dns.RR
 }
 
 type EdgeCDNXServiceResponseWriter struct {
@@ -27,22 +29,63 @@ type EdgeCDNXServiceResponseWriter struct {
 
 func (e EdgeCDNXService) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	state := request.Request{W: w, Req: r}
-	state.Name()
+	qname := state.Name()
+	qtype := state.QType()
 
-	log.Debugf("edgecdnxservices %s", state.Name())
+	log.Debugf("edgecdnxservices %s - %v", qname, qtype)
 
 	e.Sync.RLock()
 	defer e.Sync.RUnlock()
 
 	for i := range *e.Services {
 		service := (*e.Services)[i]
-		if fmt.Sprintf("%s.", service.Name) == state.Name() {
+		if fmt.Sprintf("%s.", service.Domain) == qname {
 			// Service Exists, lets continue down the chain
 			return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
 		}
 	}
-	log.Debugf("edgecdnxservices: service %s not defined in catalogue", state.Name())
-	return dns.RcodeServerFailure, nil
+
+	zone := plugin.Zones(e.Origins).Matches(qname)
+	if zone == "" {
+		return dns.RcodeServerFailure, nil
+	} else {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Authoritative = true
+
+		nxdomain := true
+		var soa dns.RR
+		for _, r := range e.Records[zone] {
+			if r.Header().Rrtype == dns.TypeSOA && soa == nil {
+				soa = r
+			}
+			if r.Header().Name == qname {
+				nxdomain = false
+				if r.Header().Rrtype == state.QType() {
+					m.Answer = append(m.Answer, r)
+				}
+			}
+		}
+
+		// handle NXDOMAIN, NODATA and normal response here.
+		if nxdomain {
+			m.Rcode = dns.RcodeNameError
+			if soa != nil {
+				m.Ns = []dns.RR{soa}
+			}
+			w.WriteMsg(m)
+			return dns.RcodeSuccess, nil
+		}
+
+		if len(m.Answer) == 0 {
+			if soa != nil {
+				m.Ns = []dns.RR{soa}
+			}
+		}
+
+		w.WriteMsg(m)
+		return dns.RcodeSuccess, nil
+	}
 }
 
 func (g EdgeCDNXService) Metadata(ctx context.Context, state request.Request) context.Context {
