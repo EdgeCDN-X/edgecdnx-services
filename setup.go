@@ -23,7 +23,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	clog "github.com/coredns/coredns/plugin/pkg/log"
+	"github.com/coredns/coredns/plugin/pkg/log"
 )
 
 // init registers this plugin.
@@ -65,8 +65,7 @@ func setup(c *caddy.Controller) error {
 	}
 
 	services := &EdgeCDNXServiceRouting{}
-
-	fmt.Printf("origins, %v\n", origins)
+	log.Infof("edgecdnxservices: Origins: %v", origins)
 	records := make(map[string][]dns.RR)
 
 	for _, o := range origins {
@@ -128,7 +127,7 @@ func setup(c *caddy.Controller) error {
 		Resource: "services",
 	}).Informer()
 
-	clog.Infof("edgecdnxservices: Watching Services in namespace %s", services.Namespace)
+	log.Infof("edgecdnxservices: Watching Services in namespace %s", services.Namespace)
 
 	sem := &sync.RWMutex{}
 
@@ -136,19 +135,19 @@ func setup(c *caddy.Controller) error {
 		AddFunc: func(obj any) {
 			s_raw, ok := obj.(*unstructured.Unstructured)
 			if !ok {
-				clog.Errorf("edgecdnxservices: expected Service object, got %T", obj)
+				log.Errorf("edgecdnxservices: expected Service object, got %T", obj)
 				return
 			}
 
 			temp, err := json.Marshal(s_raw.Object)
 			if err != nil {
-				clog.Errorf("edgecdnxservices: failed to marshal Service object: %v", err)
+				log.Errorf("edgecdnxservices: failed to marshal Service object: %v", err)
 				return
 			}
 			service := &infrastructurev1alpha1.Service{}
 			err = json.Unmarshal(temp, service)
 			if err != nil {
-				clog.Errorf("edgecdnxservices: failed to unmarshal Service object: %v", err)
+				log.Errorf("edgecdnxservices: failed to unmarshal Service object: %v", err)
 				return
 			}
 
@@ -164,24 +163,24 @@ func setup(c *caddy.Controller) error {
 			sem.Lock()
 			defer sem.Unlock()
 			services.Services = append(services.Services, s)
-			clog.Infof("edgecdnxservices: Added Service %s", service.Name)
+			log.Infof("edgecdnxservices: Added Service %s", service.Name)
 		},
 		UpdateFunc: func(oldObj, newObj any) {
 			s_new_raw, ok := newObj.(*unstructured.Unstructured)
 			if !ok {
-				clog.Errorf("edgecdnxservices: expected Service object, got %T", s_new_raw)
+				log.Errorf("edgecdnxservices: expected Service object, got %T", s_new_raw)
 				return
 			}
 
 			temp, err := json.Marshal(s_new_raw.Object)
 			if err != nil {
-				clog.Errorf("edgecdnxservices: failed to marshal Service object: %v", err)
+				log.Errorf("edgecdnxservices: failed to marshal Service object: %v", err)
 				return
 			}
 			newService := &infrastructurev1alpha1.Service{}
 			err = json.Unmarshal(temp, newService)
 			if err != nil {
-				clog.Errorf("edgecdnxservices: failed to unmarshal Service object: %v", err)
+				log.Errorf("edgecdnxservices: failed to unmarshal Service object: %v", err)
 				return
 			}
 
@@ -201,24 +200,24 @@ func setup(c *caddy.Controller) error {
 					break
 				}
 			}
-			clog.Infof("edgecdnxservices: Updated Service %s", newService.Name)
+			log.Infof("edgecdnxservices: Updated Service %s", newService.Name)
 		},
 		DeleteFunc: func(obj any) {
 			s_raw, ok := obj.(*unstructured.Unstructured)
 			if !ok {
-				clog.Errorf("edgecdnxservices: expected Service object, got %T", obj)
+				log.Errorf("edgecdnxservices: expected Service object, got %T", obj)
 				return
 			}
 
 			temp, err := json.Marshal(s_raw.Object)
 			if err != nil {
-				clog.Errorf("edgecdnxservices: failed to marshal Service object: %v", err)
+				log.Errorf("edgecdnxservices: failed to marshal Service object: %v", err)
 				return
 			}
 			service := &infrastructurev1alpha1.Service{}
 			err = json.Unmarshal(temp, service)
 			if err != nil {
-				clog.Errorf("edgecdnxservices: failed to unmarshal Service object: %v", err)
+				log.Errorf("edgecdnxservices: failed to unmarshal Service object: %v", err)
 				return
 			}
 
@@ -230,7 +229,7 @@ func setup(c *caddy.Controller) error {
 					break
 				}
 			}
-			clog.Infof("edgecdnxservices: Deleted Service %s", service.Name)
+			log.Infof("edgecdnxservices: Deleted Service %s", service.Name)
 		},
 	})
 
@@ -238,7 +237,7 @@ func setup(c *caddy.Controller) error {
 	fac.Start(factoryCloseChan)
 
 	c.OnShutdown(func() error {
-		clog.Infof("edgecdnxservices: shutting down informer")
+		log.Infof("edgecdnxservices: shutting down informer")
 		close(factoryCloseChan)
 		fac.Shutdown()
 		return nil
@@ -246,7 +245,7 @@ func setup(c *caddy.Controller) error {
 
 	for _, o := range origins {
 		for _, record := range records[o] {
-			fmt.Printf("Record: %s\n", record.String())
+			log.Infof("edgecdnxservices: Constructed record for zone %s: %s", o, record.String())
 		}
 	}
 

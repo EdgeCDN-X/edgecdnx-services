@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/coredns/coredns/plugin"
+	"github.com/coredns/coredns/plugin/metadata"
 	"github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
@@ -30,9 +31,6 @@ type EdgeCDNXServiceResponseWriter struct {
 func (e EdgeCDNXService) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	state := request.Request{W: w, Req: r}
 	qname := state.Name()
-	qtype := state.QType()
-
-	log.Debugf("edgecdnxservices %s - %v", qname, qtype)
 
 	e.Sync.RLock()
 	defer e.Sync.RUnlock()
@@ -89,6 +87,19 @@ func (e EdgeCDNXService) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *
 }
 
 func (g EdgeCDNXService) Metadata(ctx context.Context, state request.Request) context.Context {
+	for i := range *g.Services {
+		service := (*g.Services)[i]
+		if fmt.Sprintf("%s.", service.Domain) == state.Name() {
+			metadata.SetValueFunc(ctx, g.Name()+"/customer", func() string {
+				return fmt.Sprintf("%d", service.Customer.Id)
+			})
+
+			metadata.SetValueFunc(ctx, g.Name()+"/cache", func() string {
+				return service.Cache
+			})
+		}
+	}
+
 	return ctx
 }
 
