@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 
+	infrastructurev1alpha1 "github.com/EdgeCDN-X/edgecdnx-controller/api/v1alpha1"
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/metadata"
 	"github.com/coredns/coredns/plugin/pkg/log"
@@ -18,7 +19,7 @@ import (
 // Example is an example plugin to show how to write a plugin.
 type EdgeCDNXService struct {
 	Next           plugin.Handler
-	Services       *[]Service
+	Services       *[]infrastructurev1alpha1.Service
 	Sync           *sync.RWMutex
 	InformerSynced func() bool
 	Origins        []string
@@ -37,7 +38,7 @@ func (e EdgeCDNXService) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *
 
 	for i := range *e.Services {
 		service := (*e.Services)[i]
-		if fmt.Sprintf("%s.", service.Domain) == qname {
+		if fmt.Sprintf("%s.", service.Spec.Domain) == qname {
 			// Service Exists, lets continue down the chain
 			return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
 		}
@@ -89,13 +90,13 @@ func (e EdgeCDNXService) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *
 func (g EdgeCDNXService) Metadata(ctx context.Context, state request.Request) context.Context {
 	for i := range *g.Services {
 		service := (*g.Services)[i]
-		if fmt.Sprintf("%s.", service.Domain) == state.Name() {
+		if fmt.Sprintf("%s.", service.Spec.Domain) == state.Name() {
 			metadata.SetValueFunc(ctx, g.Name()+"/customer", func() string {
-				return fmt.Sprintf("%d", service.Customer.Id)
+				return fmt.Sprintf("%d", service.Spec.Customer.Id)
 			})
 
 			metadata.SetValueFunc(ctx, g.Name()+"/cache", func() string {
-				return service.Cache
+				return service.Spec.Cache
 			})
 		}
 	}

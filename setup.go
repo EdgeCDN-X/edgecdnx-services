@@ -29,25 +29,6 @@ import (
 // init registers this plugin.
 func init() { plugin.Register("edgecdnxservices", setup) }
 
-type EdgeCDNXServiceRouting struct {
-	Namespace string
-	Services  []Service
-	Email     string
-	Soa       string
-}
-
-type CustomerSpec struct {
-	Name string `yaml:"name"`
-	Id   int    `yaml:"id"`
-}
-
-type Service struct {
-	Name     string       `yaml:"name"`
-	Domain   string       `yaml:"domain"`
-	Customer CustomerSpec `yaml:"customer"`
-	Cache    string       `yaml:"cache"`
-}
-
 // setup is the function that gets called when the config parser see the token "example". Setup is responsible
 // for parsing any extra options the example plugin may have. The first token this function sees is "example".
 func setup(c *caddy.Controller) error {
@@ -64,7 +45,6 @@ func setup(c *caddy.Controller) error {
 		origins = []string{"."}
 	}
 
-	services := &EdgeCDNXServiceRouting{}
 	log.Infof("edgecdnxservices: Origins: %v", origins)
 	records := make(map[string][]dns.RR)
 
@@ -72,19 +52,20 @@ func setup(c *caddy.Controller) error {
 		records[o] = []dns.RR{}
 	}
 
-	//@ 60 IN           SOA             ns.cdn.edgecdnx.com. noc.edgecdnx.com. 2025061801 7200 3600 1209600 3600
+	var namespace, email, soa string
+	services := make([]infrastructurev1alpha1.Service, 0)
 
 	for c.NextBlock() {
 		val := c.Val()
 		args := c.RemainingArgs()
 		if val == "namespace" {
-			services.Namespace = args[0]
+			namespace = args[0]
 		}
 		if val == "email" {
-			services.Email = args[0]
+			email = args[0]
 		}
 		if val == "soa" {
-			services.Soa = args[0]
+			soa = args[0]
 		}
 		if val == "ns" {
 			if len(args) != 2 {
@@ -109,7 +90,7 @@ func setup(c *caddy.Controller) error {
 
 	for _, o := range origins {
 		serial := time.Now().Format("20060102") + "00"
-		soa, err := dns.NewRR(fmt.Sprintf("$ORIGIN %s\n@ IN SOA %s.%s %s. %s 7200 3600 1209600 3600", o, services.Soa, o, services.Email, serial))
+		soa, err := dns.NewRR(fmt.Sprintf("$ORIGIN %s\n@ IN SOA %s.%s %s. %s 7200 3600 1209600 3600", o, soa, o, email, serial))
 		if err != nil {
 			return plugin.Error("edgecdnxservices", fmt.Errorf("failed to create SOA record: %w", err))
 		}
@@ -121,14 +102,14 @@ func setup(c *caddy.Controller) error {
 		return plugin.Error("edgecdnxservices", fmt.Errorf("failed to create dynamic client: %w", err))
 	}
 
-	fac := dynamicinformer.NewFilteredDynamicSharedInformerFactory(clientSet, 10*time.Minute, services.Namespace, nil)
+	fac := dynamicinformer.NewFilteredDynamicSharedInformerFactory(clientSet, 10*time.Minute, namespace, nil)
 	informer := fac.ForResource(schema.GroupVersionResource{
 		Group:    infrastructurev1alpha1.GroupVersion.Group,
 		Version:  infrastructurev1alpha1.GroupVersion.Version,
 		Resource: "services",
 	}).Informer()
 
-	log.Infof("edgecdnxservices: Watching Services in namespace %s", services.Namespace)
+	log.Infof("edgecdnxservices: Watching Services in namespace %s", namespace)
 
 	sem := &sync.RWMutex{}
 
@@ -152,18 +133,9 @@ func setup(c *caddy.Controller) error {
 				return
 			}
 
-			s := Service{
-				Name:   service.Name,
-				Domain: service.Spec.Domain,
-				Customer: CustomerSpec{
-					Name: service.Spec.Customer.Name,
-					Id:   service.Spec.Customer.Id,
-				},
-				Cache: service.Spec.Cache,
-			}
 			sem.Lock()
 			defer sem.Unlock()
-			services.Services = append(services.Services, s)
+			services = append(services, *service)
 			log.Infof("edgecdnxservices: Added Service %s", service.Name)
 		},
 		UpdateFunc: func(oldObj, newObj any) {
@@ -187,17 +159,9 @@ func setup(c *caddy.Controller) error {
 
 			sem.Lock()
 			defer sem.Unlock()
-			for i, service := range services.Services {
+			for i, service := range services {
 				if service.Name == newService.Name {
-					services.Services[i] = Service{
-						Name:   newService.Name,
-						Domain: newService.Spec.Domain,
-						Customer: CustomerSpec{
-							Name: newService.Spec.Customer.Name,
-							Id:   newService.Spec.Customer.Id,
-						},
-						Cache: newService.Spec.Cache,
-					}
+					services[i] = *newService
 					break
 				}
 			}
@@ -224,9 +188,9 @@ func setup(c *caddy.Controller) error {
 
 			sem.Lock()
 			defer sem.Unlock()
-			for i, s := range services.Services {
+			for i, s := range services {
 				if s.Name == service.Name {
-					services.Services = append(services.Services[:i], services.Services[i+1:]...)
+					services = append(services[:i], services[i+1:]...)
 					break
 				}
 			}
@@ -252,7 +216,7 @@ func setup(c *caddy.Controller) error {
 
 	// Add the Plugin to CoreDNS, so Servers can use it in their plugin chain.
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
-		return EdgeCDNXService{Next: next, Services: &services.Services, Sync: sem, InformerSynced: informer.HasSynced, Origins: origins, Records: records}
+		return EdgeCDNXService{Next: next, Services: &services, Sync: sem, InformerSynced: informer.HasSynced, Origins: origins, Records: records}
 	})
 
 	// All OK, return a nil error.
