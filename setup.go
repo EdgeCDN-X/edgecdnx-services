@@ -108,7 +108,8 @@ func setup(c *caddy.Controller) error {
 	}
 
 	for _, o := range origins {
-		soa, err := dns.NewRR(fmt.Sprintf("$ORIGIN %s\n@ IN SOA %s.%s %s. 2025061801 7200 3600 1209600 3600", o, services.Soa, o, services.Email))
+		serial := time.Now().Format("20060102") + "00"
+		soa, err := dns.NewRR(fmt.Sprintf("$ORIGIN %s\n@ IN SOA %s.%s %s. %s 7200 3600 1209600 3600", o, services.Soa, o, services.Email, serial))
 		if err != nil {
 			return plugin.Error("edgecdnxservices", fmt.Errorf("failed to create SOA record: %w", err))
 		}
