@@ -104,8 +104,8 @@ func setup(c *caddy.Controller) error {
 
 	fac := dynamicinformer.NewFilteredDynamicSharedInformerFactory(clientSet, 10*time.Minute, namespace, nil)
 	informer := fac.ForResource(schema.GroupVersionResource{
-		Group:    infrastructurev1alpha1.GroupVersion.Group,
-		Version:  infrastructurev1alpha1.GroupVersion.Version,
+		Group:    infrastructurev1alpha1.SchemeGroupVersion.Group,
+		Version:  infrastructurev1alpha1.SchemeGroupVersion.Version,
 		Resource: "services",
 	}).Informer()
 
