@@ -18,12 +18,12 @@ import (
 
 // Example is an example plugin to show how to write a plugin.
 type EdgeCDNXService struct {
-	Next           plugin.Handler
-	Services       *[]infrastructurev1alpha1.Service
-	Sync           *sync.RWMutex
-	InformerSynced func() bool
-	Origins        []string
-	Records        map[string][]dns.RR
+	Next            plugin.Handler
+	Services        *[]infrastructurev1alpha1.Service
+	Sync            *sync.RWMutex
+	InformersSynced []func() bool
+	Zones           *[]string
+	Records         *map[string][]dns.RR
 }
 
 type EdgeCDNXServiceResponseWriter struct {
@@ -38,13 +38,14 @@ func (e EdgeCDNXService) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *
 
 	for i := range *e.Services {
 		service := (*e.Services)[i]
-		if fmt.Sprintf("%s.", service.Spec.Domain) == qname {
+		if fmt.Sprintf("%s.", service.Spec.Domain) == qname && (state.QType() == dns.TypeA || state.QType() == dns.TypeAAAA) {
 			// Service Exists, lets continue down the chain
 			return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
 		}
 	}
 
-	zone := plugin.Zones(e.Origins).Matches(qname)
+	zone := plugin.Zones(*e.Zones).Matches(qname)
+
 	if zone == "" {
 		return dns.RcodeServerFailure, nil
 	} else {
@@ -54,7 +55,7 @@ func (e EdgeCDNXService) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *
 
 		nxdomain := true
 		var soa dns.RR
-		for _, r := range e.Records[zone] {
+		for _, r := range (*e.Records)[zone] {
 			if r.Header().Rrtype == dns.TypeSOA && soa == nil {
 				soa = r
 			}

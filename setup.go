@@ -3,7 +3,7 @@ package edgecdnxservices
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
+	"slices"
 	"sync"
 	"time"
 
@@ -26,8 +26,53 @@ import (
 	"github.com/coredns/coredns/plugin/pkg/log"
 )
 
+type NSRecord struct {
+	Name string
+	IPv4 string
+	IPv6 string
+}
+
 // init registers this plugin.
 func init() { plugin.Register("edgecdnxservices", setup) }
+
+func buildZoneRecords(zone infrastructurev1alpha1.Zone, soaRec string, ns []NSRecord) ([]dns.RR, error) {
+	zoneNormalized := fmt.Sprintf("%s.", zone.Spec.Zone)
+
+	// NS records + SOA
+	recordList := make([]dns.RR, 0)
+
+	serial := time.Now().Format("20060102") + "00"
+	// Create SOA Record
+	soa, err := dns.NewRR(fmt.Sprintf("$ORIGIN %s\n@ IN SOA %s.%s %s. %s 7200 3600 1209600 3600", zoneNormalized, soaRec, zoneNormalized, zone.Spec.Email, serial))
+	if err != nil {
+		log.Errorf("edgecdnxservices: failed to create SOA record: %v", err)
+		return nil, err
+	}
+	log.Debugf("edgecdnxservices: Crafted SOA record for zone %s: %s", zoneNormalized, soa.String())
+	recordList = append(recordList, soa)
+
+	// Allowed in this block lets continue
+	for _, n := range ns {
+		re, err := dns.NewRR(fmt.Sprintf("$ORIGIN %s\n@ IN NS %s\n", zoneNormalized, n.Name))
+		if err != nil {
+			log.Errorf("edgecdnxservices: failed to create NS record: %v", err)
+			return nil, err
+		}
+		recordList = append(recordList, re)
+		log.Debugf("edgecdnxservices: Crafted NS record for zone %s: %s", zoneNormalized, re.String())
+
+		re, err = dns.NewRR(fmt.Sprintf("$ORIGIN %s\n%s IN A %s", zoneNormalized, n.Name, n.IPv4))
+		if err != nil {
+			log.Errorf("edgecdnxservices: failed to create NS A record: %v", err)
+			return nil, err
+		}
+		recordList = append(recordList, re)
+
+		log.Debugf("edgecdnxservices: Crafted NS A record for zone %s: %s", zoneNormalized, re.String())
+	}
+
+	return recordList, nil
+}
 
 // setup is the function that gets called when the config parser see the token "example". Setup is responsible
 // for parsing any extra options the example plugin may have. The first token this function sees is "example".
@@ -39,8 +84,10 @@ func setup(c *caddy.Controller) error {
 	kubeconfig := ctrl.GetConfigOrDie()
 	c.Next() // plugin name
 
+	// Only parse origins from the server block keys
 	origins := plugin.OriginsFromArgsOrServerBlock(c.RemainingArgs(), c.ServerBlockKeys)
 
+	// If no origin specified, use default "."
 	if len(origins) == 0 {
 		origins = []string{"."}
 	}
@@ -48,11 +95,10 @@ func setup(c *caddy.Controller) error {
 	log.Infof("edgecdnxservices: Origins: %v", origins)
 	records := make(map[string][]dns.RR)
 
-	for _, o := range origins {
-		records[o] = []dns.RR{}
-	}
+	var namespace, soa string // Base Zone configuration
+	var ns []NSRecord = make([]NSRecord, 0)
 
-	var namespace, email, soa string
+	zones := make([]string, 0)
 	services := make([]infrastructurev1alpha1.Service, 0)
 
 	for c.NextBlock() {
@@ -61,9 +107,6 @@ func setup(c *caddy.Controller) error {
 		if val == "namespace" {
 			namespace = args[0]
 		}
-		if val == "email" {
-			email = args[0]
-		}
 		if val == "soa" {
 			soa = args[0]
 		}
@@ -71,30 +114,8 @@ func setup(c *caddy.Controller) error {
 			if len(args) != 2 {
 				return plugin.Error("edgecdnxservices", fmt.Errorf("expected 2 arguments for ns, got %d", len(args)))
 			}
-			for _, o := range origins {
-				re, err := dns.NewRR(fmt.Sprintf("$ORIGIN %s\n@ IN NS %s\n", o, args[0]))
-				re.Header().Name = strings.ToLower(re.Header().Name)
-				if err != nil {
-					return plugin.Error("edgecdnxservices", fmt.Errorf("failed to create NS record: %w", err))
-				}
-				records[o] = append(records[o], re)
-				re, err = dns.NewRR(fmt.Sprintf("$ORIGIN %s\n%s IN A %s", o, args[0], args[1]))
-				re.Header().Name = strings.ToLower(re.Header().Name)
-				if err != nil {
-					return plugin.Error("edgecdnxservices", fmt.Errorf("failed to create NS record: %w", err))
-				}
-				records[o] = append(records[o], re)
-			}
+			ns = append(ns, NSRecord{Name: args[0], IPv4: args[1]})
 		}
-	}
-
-	for _, o := range origins {
-		serial := time.Now().Format("20060102") + "00"
-		soa, err := dns.NewRR(fmt.Sprintf("$ORIGIN %s\n@ IN SOA %s.%s %s. %s 7200 3600 1209600 3600", o, soa, o, email, serial))
-		if err != nil {
-			return plugin.Error("edgecdnxservices", fmt.Errorf("failed to create SOA record: %w", err))
-		}
-		records[o] = append(records[o], soa)
 	}
 
 	clientSet, err := dynamic.NewForConfig(kubeconfig)
@@ -103,7 +124,127 @@ func setup(c *caddy.Controller) error {
 	}
 
 	fac := dynamicinformer.NewFilteredDynamicSharedInformerFactory(clientSet, 10*time.Minute, namespace, nil)
-	informer := fac.ForResource(schema.GroupVersionResource{
+
+	sem := &sync.RWMutex{}
+
+	zoneInformer := fac.ForResource(schema.GroupVersionResource{
+		Group:    infrastructurev1alpha1.SchemeGroupVersion.Group,
+		Version:  infrastructurev1alpha1.SchemeGroupVersion.Version,
+		Resource: "zones",
+	}).Informer()
+
+	log.Infof("edgecdnxservices: Watching Zones in namespace %s", namespace)
+
+	zoneInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) {
+			s_raw, ok := obj.(*unstructured.Unstructured)
+			if !ok {
+				log.Errorf("edgecdnxservices: expected Zone object, got %T", obj)
+				return
+			}
+
+			temp, err := json.Marshal(s_raw.Object)
+			if err != nil {
+				log.Errorf("edgecdnxservices: failed to marshal Zone object: %v", err)
+				return
+			}
+			zone := &infrastructurev1alpha1.Zone{}
+			err = json.Unmarshal(temp, zone)
+			if err != nil {
+				log.Errorf("edgecdnxservices: failed to unmarshal Zone object: %v", err)
+				return
+			}
+
+			sem.Lock()
+			defer sem.Unlock()
+
+			zoneNormalized := fmt.Sprintf("%s.", zone.Spec.Zone)
+			lookup := plugin.Zones(origins).Matches(zoneNormalized)
+
+			if lookup != "" {
+				match := plugin.Zones(zones).Matches(zoneNormalized)
+				if match != "" {
+					log.Warningf("edgecdnxservices: Zone %s already covered by %s, ignoring", zoneNormalized, match)
+					return
+				}
+
+				recordList, err := buildZoneRecords(*zone, soa, ns)
+				if err != nil {
+					log.Errorf("edgecdnxservices: failed to build zone records for zone %s: %v", zoneNormalized, err)
+					return
+				}
+
+				zones = append(zones, zoneNormalized)
+				records[zoneNormalized] = recordList
+				log.Infof("edgecdnxservices: Added Zone %s, with the following records: %v", zoneNormalized, recordList)
+			} else {
+				log.Warningf("edgecdnxservices: Zone %s is not served in this block. Ignoring", zoneNormalized)
+			}
+		},
+		UpdateFunc: func(oldObj, newObj any) {
+			z_new_raw, ok := newObj.(*unstructured.Unstructured)
+			if !ok {
+				log.Errorf("edgecdnxservices: expected zone object, got %T", z_new_raw)
+				return
+			}
+
+			temp, err := json.Marshal(z_new_raw.Object)
+			if err != nil {
+				log.Errorf("edgecdnxservices: failed to marshal zone object: %v", err)
+				return
+			}
+			newZone := &infrastructurev1alpha1.Zone{}
+			err = json.Unmarshal(temp, newZone)
+			if err != nil {
+				log.Errorf("edgecdnxservices: failed to unmarshal zone object: %v", err)
+				return
+			}
+
+			sem.Lock()
+			defer sem.Unlock()
+
+			zoneNormalized := fmt.Sprintf("%s.", newZone.Spec.Zone)
+			recordList, err := buildZoneRecords(*newZone, soa, ns)
+			if err != nil {
+				log.Errorf("edgecdnxservices: failed to build zone records for zone %s: %v", zoneNormalized, err)
+				return
+			}
+
+			delete(records, zoneNormalized)
+			records[zoneNormalized] = recordList
+		},
+		DeleteFunc: func(obj any) {
+			z_raw, ok := obj.(*unstructured.Unstructured)
+			if !ok {
+				log.Errorf("edgecdnxservices: expected Zone object, got %T", obj)
+				return
+			}
+
+			temp, err := json.Marshal(z_raw.Object)
+			if err != nil {
+				log.Errorf("edgecdnxservices: failed to marshal Zone object: %v", err)
+				return
+			}
+			zone := &infrastructurev1alpha1.Zone{}
+			err = json.Unmarshal(temp, zone)
+			if err != nil {
+				log.Errorf("edgecdnxservices: failed to unmarshal Service object: %v", err)
+				return
+			}
+
+			sem.Lock()
+			defer sem.Unlock()
+
+			zoneNormalized := fmt.Sprintf("%s.", zone.Spec.Zone)
+			delete(records, zoneNormalized)
+			zones = slices.DeleteFunc(zones, func(z string) bool {
+				return z == zoneNormalized
+			})
+			log.Infof("edgecdnxservices: Deleted Zone %s", zoneNormalized)
+		},
+	})
+
+	serviceInformer := fac.ForResource(schema.GroupVersionResource{
 		Group:    infrastructurev1alpha1.SchemeGroupVersion.Group,
 		Version:  infrastructurev1alpha1.SchemeGroupVersion.Version,
 		Resource: "services",
@@ -111,9 +252,7 @@ func setup(c *caddy.Controller) error {
 
 	log.Infof("edgecdnxservices: Watching Services in namespace %s", namespace)
 
-	sem := &sync.RWMutex{}
-
-	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	serviceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			s_raw, ok := obj.(*unstructured.Unstructured)
 			if !ok {
@@ -208,15 +347,12 @@ func setup(c *caddy.Controller) error {
 		return nil
 	})
 
-	for _, o := range origins {
-		for _, record := range records[o] {
-			log.Infof("edgecdnxservices: Constructed record for zone %s: %s", o, record.String())
-		}
-	}
-
 	// Add the Plugin to CoreDNS, so Servers can use it in their plugin chain.
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
-		return EdgeCDNXService{Next: next, Services: &services, Sync: sem, InformerSynced: informer.HasSynced, Origins: origins, Records: records}
+		readinessProbes := make([]func() bool, 2)
+		redinessProbes := append(readinessProbes, serviceInformer.HasSynced)
+
+		return EdgeCDNXService{Next: next, Services: &services, Sync: sem, InformersSynced: redinessProbes, Zones: &zones, Records: &records}
 	})
 
 	// All OK, return a nil error.
