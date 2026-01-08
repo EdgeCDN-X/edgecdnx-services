@@ -349,8 +349,9 @@ func setup(c *caddy.Controller) error {
 
 	// Add the Plugin to CoreDNS, so Servers can use it in their plugin chain.
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
-		readinessProbes := make([]func() bool, 2)
+		readinessProbes := make([]func() bool, 0)
 		redinessProbes := append(readinessProbes, serviceInformer.HasSynced)
+		redinessProbes = append(redinessProbes, zoneInformer.HasSynced)
 
 		return EdgeCDNXService{Next: next, Services: &services, Sync: sem, InformersSynced: redinessProbes, Zones: &zones, Records: &records}
 	})
