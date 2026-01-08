@@ -42,6 +42,14 @@ func (e EdgeCDNXService) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *
 			// Service Exists, lets continue down the chain
 			return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
 		}
+
+		for _, ha := range service.Spec.HostAliases {
+			if fmt.Sprintf("%s.", ha.Name) == qname && (state.QType() == dns.TypeA || state.QType() == dns.TypeAAAA) {
+				log.Debugf("HostAlias %s found for domain %s", ha.Name, service.Spec.Domain)
+				// HostAlias Exists, lets continue down the chain
+				return plugin.NextOrFailure(e.Name(), e.Next, ctx, w, r)
+			}
+		}
 	}
 
 	zone := plugin.Zones(*e.Zones).Matches(qname)
@@ -88,17 +96,29 @@ func (e EdgeCDNXService) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *
 	}
 }
 
+func (g EdgeCDNXService) setServiceMeta(ctx context.Context, service *infrastructurev1alpha1.Service) context.Context {
+	metadata.SetValueFunc(ctx, g.Name()+"/customer", func() string {
+		return fmt.Sprintf("%d", service.Spec.Customer.Id)
+	})
+
+	metadata.SetValueFunc(ctx, g.Name()+"/cache", func() string {
+		return service.Spec.Cache
+	})
+
+	return ctx
+}
+
 func (g EdgeCDNXService) Metadata(ctx context.Context, state request.Request) context.Context {
 	for i := range *g.Services {
 		service := (*g.Services)[i]
 		if fmt.Sprintf("%s.", service.Spec.Domain) == state.Name() {
-			metadata.SetValueFunc(ctx, g.Name()+"/customer", func() string {
-				return fmt.Sprintf("%d", service.Spec.Customer.Id)
-			})
+			return g.setServiceMeta(ctx, &service)
+		}
 
-			metadata.SetValueFunc(ctx, g.Name()+"/cache", func() string {
-				return service.Spec.Cache
-			})
+		for _, ha := range service.Spec.HostAliases {
+			if fmt.Sprintf("%s.", ha.Name) == state.Name() {
+				return g.setServiceMeta(ctx, &service)
+			}
 		}
 	}
 
